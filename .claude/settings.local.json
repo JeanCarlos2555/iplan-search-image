@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "WebFetch(domain:www.farma22.com.br)",
+      "WebFetch(domain:www.drogariaminasbrasil.com.br)",
+      "WebFetch(domain:www.drogariascampea.com.br)",
+      "WebFetch(domain:www.drogariasminasmais.com.br)"
+    ]
+  }
+}
