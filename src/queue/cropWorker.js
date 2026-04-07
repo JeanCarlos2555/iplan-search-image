@@ -107,7 +107,7 @@ async function finalizeBatch(batchId) {
 
   return new Promise((resolve, reject) => {
     const output = fs.createWriteStream(zipPath);
-    const archive = archiver("zip", { zlib: { level: 6 } });
+    const archive = archiver("zip", { zlib: { level: 1 } });
 
     output.on("close", async () => {
       console.log(`[CropWorker] ZIP gerado: ${zipPath} (${archive.pointer()} bytes)`);
@@ -127,16 +127,27 @@ async function finalizeBatch(batchId) {
 
     archive.pipe(output);
 
-    // Adiciona cada imagem de sucesso ao ZIP
+    // Busca todos os buffers do Redis em paralelo (lotes de 50)
     const addImages = async () => {
-      for (const item of batch.results.success) {
-        const buffer = await getImageBuffer(batchId, item.ean);
-        if (buffer) {
-          archive.append(buffer, { name: `${item.ean}_L.png` });
+      const items = batch.results.success;
+      const PARALLEL = 50;
+
+      for (let i = 0; i < items.length; i += PARALLEL) {
+        const chunk = items.slice(i, i + PARALLEL);
+        const buffers = await Promise.all(
+          chunk.map(async (item) => ({
+            ean: item.ean,
+            buffer: await getImageBuffer(batchId, item.ean),
+          }))
+        );
+
+        for (const { ean, buffer } of buffers) {
+          if (buffer) {
+            archive.append(buffer, { name: `${ean}_L.png` });
+          }
         }
       }
 
-      // Adiciona relatório
       const report = JSON.stringify(batch.results, null, 2);
       archive.append(report, { name: "relatorio.json" });
 
