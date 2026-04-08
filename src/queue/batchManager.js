@@ -100,38 +100,9 @@ async function completeBatch(batchId, zipPath) {
   await redis.hset(key, "status", "done", "zipPath", zipPath);
 }
 
-/**
- * Armazena o buffer de uma imagem processada no Redis (temporário).
- */
-async function storeImageBuffer(batchId, ean, buffer) {
-  const imageKey = `batch:${batchId}:img:${ean}`;
-  await redis.set(imageKey, buffer, "EX", BATCH_TTL);
-}
-
-/**
- * Recupera o buffer de uma imagem processada.
- */
-async function getImageBuffer(batchId, ean) {
-  const imageKey = `batch:${batchId}:img:${ean}`;
-  return redis.getBuffer(imageKey);
-}
-
-/**
- * Remove os buffers de imagens temporários do lote.
- */
-async function cleanupImageBuffers(batchId, eans) {
-  const keys = eans.map((ean) => `batch:${batchId}:img:${ean}`);
-  if (keys.length > 0) {
-    await redis.del(...keys);
-  }
-}
-
 module.exports = {
   createBatch,
   getBatch,
   recordEanResult,
   completeBatch,
-  storeImageBuffer,
-  getImageBuffer,
-  cleanupImageBuffers,
 };

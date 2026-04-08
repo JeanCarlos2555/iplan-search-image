@@ -7,8 +7,6 @@ const { cropProductImage } = require("../imageCrop");
 const {
   recordEanResult,
   completeBatch,
-  getImageBuffer,
-  cleanupImageBuffers,
   getBatch,
 } = require("./batchManager");
 
@@ -17,42 +15,41 @@ const connection = createRedisConnection();
 const CROP_CONCURRENCY = parseInt(process.env.CROP_CONCURRENCY || "3", 10);
 const OUTPUT_DIR = process.env.ZIP_OUTPUT_DIR || path.join(process.cwd(), "output");
 
-// Garante que o diretório de saída existe
 if (!fs.existsSync(OUTPUT_DIR)) {
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 }
 
 /**
  * Worker da fila de recorte.
- * Dois tipos de job:
- * 1. Recorte individual: recebe { batchId, ean, source, url }
- * 2. Finalização do lote: recebe { batchId, action: "finalize" }
+ * Lê imagem raw do disco, recorta e salva como _L.png no disco.
  */
 const cropWorker = new Worker(
   QUEUE_NAMES.CROP,
   async (job) => {
     const { batchId, action } = job.data;
 
-    // Job de finalização: gera o ZIP
     if (action === "finalize") {
       return await finalizeBatch(batchId);
     }
 
-    // Job de recorte individual
     const { ean, source, url } = job.data;
     console.log(`[CropWorker] Recortando EAN ${ean} do lote ${batchId}`);
 
     try {
-      const imageBuffer = await getImageBuffer(batchId, ean);
-      if (!imageBuffer) {
-        throw new Error("Buffer da imagem não encontrado no Redis");
+      const batchDir = path.join(OUTPUT_DIR, `batch_${batchId}`);
+      const rawPath = path.join(batchDir, `${ean}_raw.png`);
+
+      if (!fs.existsSync(rawPath)) {
+        throw new Error("Arquivo raw não encontrado no disco");
       }
 
+      const imageBuffer = fs.readFileSync(rawPath);
       const croppedBuffer = await cropProductImage(imageBuffer);
 
-      // Sobrescreve com a imagem recortada
-      const { storeImageBuffer } = require("./batchManager");
-      await storeImageBuffer(batchId, ean, croppedBuffer);
+      // Salva recortada e remove a raw
+      const croppedPath = path.join(batchDir, `${ean}_L.png`);
+      fs.writeFileSync(croppedPath, croppedBuffer);
+      fs.unlinkSync(rawPath);
 
       const batchDone = await recordEanResult(batchId, {
         ean,
@@ -70,6 +67,10 @@ const cropWorker = new Worker(
       return { ean, cropped: true };
     } catch (err) {
       console.error(`[CropWorker] Erro ao recortar EAN ${ean}:`, err.message);
+
+      // Remove raw se existir
+      const rawPath = path.join(OUTPUT_DIR, `batch_${batchId}`, `${ean}_raw.png`);
+      if (fs.existsSync(rawPath)) fs.unlinkSync(rawPath);
 
       const batchDone = await recordEanResult(batchId, {
         ean,
@@ -91,7 +92,7 @@ const cropWorker = new Worker(
 );
 
 /**
- * Gera o ZIP final com todas as imagens recortadas do lote.
+ * Gera o ZIP final a partir dos arquivos _L.png já salvos no disco.
  */
 async function finalizeBatch(batchId) {
   console.log(`[CropWorker] Finalizando lote ${batchId}, gerando ZIP...`);
@@ -102,20 +103,19 @@ async function finalizeBatch(batchId) {
     return;
   }
 
-  const zipFileName = `batch_${batchId}.zip`;
-  const zipPath = path.join(OUTPUT_DIR, zipFileName);
+  const batchDir = path.join(OUTPUT_DIR, `batch_${batchId}`);
+  const zipPath = path.join(OUTPUT_DIR, `batch_${batchId}.zip`);
 
   return new Promise((resolve, reject) => {
     const output = fs.createWriteStream(zipPath);
-    const archive = archiver("zip", { zlib: { level: 1 } });
+    const archive = archiver("zip", { store: true });
 
     output.on("close", async () => {
       console.log(`[CropWorker] ZIP gerado: ${zipPath} (${archive.pointer()} bytes)`);
       await completeBatch(batchId, zipPath);
 
-      // Limpa buffers temporários do Redis
-      const successEans = batch.results.success.map((r) => r.ean);
-      await cleanupImageBuffers(batchId, successEans);
+      // Remove a pasta temporária do lote
+      fs.rmSync(batchDir, { recursive: true, force: true });
 
       resolve({ batchId, zipPath });
     });
@@ -127,34 +127,19 @@ async function finalizeBatch(batchId) {
 
     archive.pipe(output);
 
-    // Busca todos os buffers do Redis em paralelo (lotes de 50)
-    const addImages = async () => {
-      const items = batch.results.success;
-      const PARALLEL = 50;
-
-      for (let i = 0; i < items.length; i += PARALLEL) {
-        const chunk = items.slice(i, i + PARALLEL);
-        const buffers = await Promise.all(
-          chunk.map(async (item) => ({
-            ean: item.ean,
-            buffer: await getImageBuffer(batchId, item.ean),
-          }))
-        );
-
-        for (const { ean, buffer } of buffers) {
-          if (buffer) {
-            archive.append(buffer, { name: `${ean}_L.png` });
-          }
-        }
+    // Lê os arquivos _L.png direto do disco
+    for (const item of batch.results.success) {
+      const filePath = path.join(batchDir, `${item.ean}_L.png`);
+      if (fs.existsSync(filePath)) {
+        archive.file(filePath, { name: `${item.ean}_L.png` });
       }
+    }
 
-      const report = JSON.stringify(batch.results, null, 2);
-      archive.append(report, { name: "relatorio.json" });
+    // Relatório
+    const report = JSON.stringify(batch.results, null, 2);
+    archive.append(report, { name: "relatorio.json" });
 
-      await archive.finalize();
-    };
-
-    addImages().catch(reject);
+    archive.finalize();
   });
 }
 
