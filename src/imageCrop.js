@@ -7,31 +7,37 @@ const sharp = require("sharp");
  * @param {Buffer} imageBuffer - Buffer da imagem original
  * @returns {Promise<Buffer>} - Buffer da imagem recortada em PNG
  */
-async function cropProductImage(imageBuffer) {
-  // Primeiro, converte para PNG com canal alpha para manipulação
-  let image = sharp(imageBuffer).png();
+const MAX_IMAGE_SIZE = parseInt(process.env.MAX_IMAGE_SIZE || "0", 10);
 
-  // Obtém metadata para saber dimensões
-  const metadata = await image.metadata();
+async function cropProductImage(imageBuffer) {
+  const metadata = await sharp(imageBuffer).metadata();
   if (!metadata.width || !metadata.height) {
     throw new Error("Não foi possível obter dimensões da imagem");
   }
 
-  // Usa trim() do sharp para remover bordas com cor similar
-  // threshold: tolerância de cor para considerar como "fundo"
   const trimmed = await sharp(imageBuffer)
     .trim({ threshold: 30 })
     .png()
     .toBuffer();
 
-  // Verifica se a imagem resultante não ficou muito pequena
   const trimmedMeta = await sharp(trimmed).metadata();
+  let result = trimmed;
+
   if (trimmedMeta.width < 10 || trimmedMeta.height < 10) {
-    // Se ficou muito pequena, retorna a original sem trim agressivo
-    return sharp(imageBuffer).trim({ threshold: 10 }).png().toBuffer();
+    result = await sharp(imageBuffer).trim({ threshold: 10 }).png().toBuffer();
   }
 
-  return trimmed;
+  if (MAX_IMAGE_SIZE > 0) {
+    const meta = await sharp(result).metadata();
+    if (meta.width > MAX_IMAGE_SIZE || meta.height > MAX_IMAGE_SIZE) {
+      result = await sharp(result)
+        .resize(MAX_IMAGE_SIZE, MAX_IMAGE_SIZE, { fit: "inside", withoutEnlargement: true })
+        .png()
+        .toBuffer();
+    }
+  }
+
+  return result;
 }
 
 module.exports = { cropProductImage };
